@@ -1,18 +1,23 @@
 import logging
 from pyrogram.errors import InputUserDeactivated, UserNotParticipant, FloodWait, UserIsBlocked, PeerIdInvalid
 from info import AUTH_CHANNEL, LONG_IMDB_DESCRIPTION, MAX_LIST_ELM
-from imdb import IMDb
+from imdb import Cinemagoer 
 import asyncio
 from pyrogram.types import Message, InlineKeyboardButton
 from pyrogram import enums
 from typing import Union
+from Script import script
+import pytz
+import random 
 import re
 import os
-from datetime import datetime
+from datetime import datetime, date
+import string
 from typing import List
 from database.users_chats_db import db
 from bs4 import BeautifulSoup
 import requests
+import aiohttp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -21,7 +26,7 @@ BTN_URL_REGEX = re.compile(
     r"(\[([^\[]+?)\]\((buttonurl|buttonalert):(?:/{0,2})(.+?)(:same)?\))"
 )
 
-imdb = IMDb() 
+imdb = Cinemagoer() 
 
 BANNED = {}
 SMART_OPEN = '“'
@@ -33,7 +38,6 @@ class temp(object):
     BANNED_USERS = []
     BANNED_CHATS = []
     ME = None
-    MENTION = None
     CURRENT=int(os.environ.get("SKIP", 2))
     CANCEL = False
     MELCOW = {}
@@ -49,14 +53,13 @@ async def is_subscribed(bot, query):
     except Exception as e:
         logger.exception(e)
     else:
-        if user.status != 'kicked':
+        if user.status != enums.ChatMemberStatus.BANNED:
             return True
 
     return False
 
 async def get_poster(query, bulk=False, id=False, file=None):
     if not id:
-        # https://t.me/GetTGLink/4183
         query = (query.strip()).lower()
         title = query
         year = re.findall(r'[1-2]\d{3}$', query, re.IGNORECASE)
@@ -132,7 +135,6 @@ async def get_poster(query, bulk=False, id=False, file=None):
         'rating': str(movie.get("rating")),
         'url':f'https://www.imdb.com/title/tt{movieid}'
     }
-# https://github.com/odysseusmax/animated-lamp/blob/2ef4730eb2b5f0596ed6d03e7b05243d93e3415b/bot/utils/broadcast.py#L37
 
 async def broadcast_messages(user_id, message):
     try:
@@ -152,6 +154,20 @@ async def broadcast_messages(user_id, message):
         await db.delete_user(int(user_id))
         logging.info(f"{user_id} - PeerIdInvalid")
         return False, "Error"
+    except Exception as e:
+        return False, "Error"
+
+async def broadcast_messages_group(chat_id, message):
+    try:
+        kd = await message.copy(chat_id=chat_id)
+        try:
+            await kd.pin()
+        except:
+            pass
+        return True, "Succes"
+    except FloodWait as e:
+        await asyncio.sleep(e.x)
+        return await broadcast_messages_group(chat_id, message)
     except Exception as e:
         return False, "Error"
 
@@ -178,7 +194,7 @@ async def get_settings(group_id):
     
 async def save_group_settings(group_id, key, value):
     current = await get_settings(group_id)
-    current[key] = redirected_env(value) if key == "redirect_to"  else value   
+    current[key] = value
     temp.SETTINGS[group_id] = current
     await db.update_settings(group_id, current)
     
@@ -216,7 +232,6 @@ def get_file_id(msg: Message):
 
 def extract_user(message: Message) -> Union[int, str]:
     """extracts the user from a message"""
-    # https://github.com/SpEcHiDe/PyroGramBot/blob/f30e2cca12002121bad1982f68cd0ff9814ce027/pyrobot/helper_functions/extract_user.py#L7
     user_id = None
     user_first_name = None
     if message.reply_to_message:
@@ -226,7 +241,7 @@ def extract_user(message: Message) -> Union[int, str]:
     elif len(message.command) > 1:
         if (
             len(message.entities) > 1 and
-            message.entities[1].type == "text_mention"
+            message.entities[1].type == enums.MessageEntityType.TEXT_MENTION
         ):
            
             required_entity = message.entities[1]
@@ -260,18 +275,18 @@ def last_online(from_user):
     time = ""
     if from_user.is_bot:
         time += "🤖 Bot :("
-    elif from_user.status == 'recently':
+    elif from_user.status == enums.UserStatus.RECENTLY:
         time += "Recently"
-    elif from_user.status == 'within_week':
+    elif from_user.status == enums.UserStatus.LAST_WEEK:
         time += "Within the last week"
-    elif from_user.status == 'within_month':
+    elif from_user.status == enums.UserStatus.LAST_MONTH:
         time += "Within the last month"
-    elif from_user.status == 'long_time_ago':
+    elif from_user.status == enums.UserStatus.LONG_AGO:
         time += "A long time ago :("
-    elif from_user.status == 'online':
+    elif from_user.status == enums.UserStatus.ONLINE:
         time += "Currently Online"
-    elif from_user.status == 'offline':
-        time += datetime.fromtimestamp(from_user.last_online_date).strftime("%a, %d %b %Y, %H:%M:%S")
+    elif from_user.status == enums.UserStatus.OFFLINE:
+        time += from_user.last_online_date.strftime("%a, %d %b %Y, %H:%M:%S")
     return time
 
 
@@ -295,6 +310,62 @@ def split_quotes(text: str) -> List:
     if not key:
         key = text[0] + text[0]
     return list(filter(None, [key, rest]))
+
+def gfilterparser(text, keyword):
+    if "buttonalert" in text:
+        text = (text.replace("\n", "\\n").replace("\t", "\\t"))
+    buttons = []
+    note_data = ""
+    prev = 0
+    i = 0
+    alerts = []
+    for match in BTN_URL_REGEX.finditer(text):
+        # Check if btnurl is escaped
+        n_escapes = 0
+        to_check = match.start(1) - 1
+        while to_check > 0 and text[to_check] == "\\":
+            n_escapes += 1
+            to_check -= 1
+
+        # if even, not escaped -> create button
+        if n_escapes % 2 == 0:
+            note_data += text[prev:match.start(1)]
+            prev = match.end(1)
+            if match.group(3) == "buttonalert":
+                # create a thruple with button label, url, and newline status
+                if bool(match.group(5)) and buttons:
+                    buttons[-1].append(InlineKeyboardButton(
+                        text=match.group(2),
+                        callback_data=f"gfilteralert:{i}:{keyword}"
+                    ))
+                else:
+                    buttons.append([InlineKeyboardButton(
+                        text=match.group(2),
+                        callback_data=f"gfilteralert:{i}:{keyword}"
+                    )])
+                i += 1
+                alerts.append(match.group(4))
+            elif bool(match.group(5)) and buttons:
+                buttons[-1].append(InlineKeyboardButton(
+                    text=match.group(2),
+                    url=match.group(4).replace(" ", "")
+                ))
+            else:
+                buttons.append([InlineKeyboardButton(
+                    text=match.group(2),
+                    url=match.group(4).replace(" ", "")
+                )])
+
+        else:
+            note_data += text[prev:to_check]
+            prev = match.start(1) - 1
+    else:
+        note_data += text[prev:]
+
+    try:
+        return note_data, buttons, alerts
+    except:
+        return note_data, buttons, None
 
 def parser(text, keyword):
     if "buttonalert" in text:
