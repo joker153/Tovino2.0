@@ -1,23 +1,18 @@
 import logging
 from pyrogram.errors import InputUserDeactivated, UserNotParticipant, FloodWait, UserIsBlocked, PeerIdInvalid
 from info import AUTH_CHANNEL, LONG_IMDB_DESCRIPTION, MAX_LIST_ELM
-from imdb import Cinemagoer 
+from imdb import IMDb
 import asyncio
 from pyrogram.types import Message, InlineKeyboardButton
 from pyrogram import enums
 from typing import Union
-from Script import script
-import pytz
-import random 
 import re
 import os
-from datetime import datetime, date
-import string
+from datetime import datetime
 from typing import List
 from database.users_chats_db import db
 from bs4 import BeautifulSoup
 import requests
-import aiohttp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -26,7 +21,7 @@ BTN_URL_REGEX = re.compile(
     r"(\[([^\[]+?)\]\((buttonurl|buttonalert):(?:/{0,2})(.+?)(:same)?\))"
 )
 
-imdb = Cinemagoer() 
+imdb = IMDb() 
 
 BANNED = {}
 SMART_OPEN = '“'
@@ -38,6 +33,7 @@ class temp(object):
     BANNED_USERS = []
     BANNED_CHATS = []
     ME = None
+    MENTION = None
     CURRENT=int(os.environ.get("SKIP", 2))
     CANCEL = False
     MELCOW = {}
@@ -53,13 +49,14 @@ async def is_subscribed(bot, query):
     except Exception as e:
         logger.exception(e)
     else:
-        if user.status != enums.ChatMemberStatus.BANNED:
+        if user.status != 'kicked':
             return True
 
     return False
 
 async def get_poster(query, bulk=False, id=False, file=None):
     if not id:
+        # https://t.me/GetTGLink/4183
         query = (query.strip()).lower()
         title = query
         year = re.findall(r'[1-2]\d{3}$', query, re.IGNORECASE)
@@ -135,6 +132,7 @@ async def get_poster(query, bulk=False, id=False, file=None):
         'rating': str(movie.get("rating")),
         'url':f'https://www.imdb.com/title/tt{movieid}'
     }
+# https://github.com/odysseusmax/animated-lamp/blob/2ef4730eb2b5f0596ed6d03e7b05243d93e3415b/bot/utils/broadcast.py#L37
 
 async def broadcast_messages(user_id, message):
     try:
@@ -154,20 +152,6 @@ async def broadcast_messages(user_id, message):
         await db.delete_user(int(user_id))
         logging.info(f"{user_id} - PeerIdInvalid")
         return False, "Error"
-    except Exception as e:
-        return False, "Error"
-
-async def broadcast_messages_group(chat_id, message):
-    try:
-        kd = await message.copy(chat_id=chat_id)
-        try:
-            await kd.pin()
-        except:
-            pass
-        return True, "Succes"
-    except FloodWait as e:
-        await asyncio.sleep(e.x)
-        return await broadcast_messages_group(chat_id, message)
     except Exception as e:
         return False, "Error"
 
@@ -194,7 +178,7 @@ async def get_settings(group_id):
     
 async def save_group_settings(group_id, key, value):
     current = await get_settings(group_id)
-    current[key] = value
+    current[key] = redirected_env(value) if key == "redirect_to"  else value   
     temp.SETTINGS[group_id] = current
     await db.update_settings(group_id, current)
     
@@ -232,6 +216,7 @@ def get_file_id(msg: Message):
 
 def extract_user(message: Message) -> Union[int, str]:
     """extracts the user from a message"""
+    # https://github.com/SpEcHiDe/PyroGramBot/blob/f30e2cca12002121bad1982f68cd0ff9814ce027/pyrobot/helper_functions/extract_user.py#L7
     user_id = None
     user_first_name = None
     if message.reply_to_message:
@@ -241,7 +226,7 @@ def extract_user(message: Message) -> Union[int, str]:
     elif len(message.command) > 1:
         if (
             len(message.entities) > 1 and
-            message.entities[1].type == enums.MessageEntityType.TEXT_MENTION
+            message.entities[1].type == "text_mention"
         ):
            
             required_entity = message.entities[1]
@@ -275,18 +260,18 @@ def last_online(from_user):
     time = ""
     if from_user.is_bot:
         time += "🤖 Bot :("
-    elif from_user.status == enums.UserStatus.RECENTLY:
+    elif from_user.status == 'recently':
         time += "Recently"
-    elif from_user.status == enums.UserStatus.LAST_WEEK:
+    elif from_user.status == 'within_week':
         time += "Within the last week"
-    elif from_user.status == enums.UserStatus.LAST_MONTH:
+    elif from_user.status == 'within_month':
         time += "Within the last month"
-    elif from_user.status == enums.UserStatus.LONG_AGO:
+    elif from_user.status == 'long_time_ago':
         time += "A long time ago :("
-    elif from_user.status == enums.UserStatus.ONLINE:
+    elif from_user.status == 'online':
         time += "Currently Online"
-    elif from_user.status == enums.UserStatus.OFFLINE:
-        time += from_user.last_online_date.strftime("%a, %d %b %Y, %H:%M:%S")
+    elif from_user.status == 'offline':
+        time += datetime.fromtimestamp(from_user.last_online_date).strftime("%a, %d %b %Y, %H:%M:%S")
     return time
 
 
